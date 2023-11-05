@@ -12,7 +12,10 @@ lint:
 	golangci-lint run
 
 test:
-	go test -v ./...
+	go test -v -covermode=count -coverprofile=coverage.out ./...
+
+build:
+	go build -ldflags '-s -w' -o conncheck ./cmd/conncheck
 
 install:
 	go install -ldflags '-s -w' ./cmd/conncheck

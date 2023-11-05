@@ -39,12 +39,15 @@ type connCheck struct {
 	config *Config
 }
 
+// NewConncheck creates a new conncheck.
 func NewConncheck(config *Config) *connCheck {
 	return &connCheck{
 		config: config,
 	}
 }
 
+// flags returns the command line flags and sets the default configuration
+// values.
 func (cc *connCheck) flags() flag.FlagSet {
 	flags := flag.NewFlagSet("", flag.ExitOnError)
 
@@ -63,7 +66,7 @@ func (cc *connCheck) flags() flag.FlagSet {
 	return *flags
 }
 
-// New creates a new conncheck analyzer.
+// New creates a new conncheck analyzer for golangci-lint.
 func New(config *Config) *analysis.Analyzer {
 	cc := NewConncheck(config)
 
@@ -76,6 +79,7 @@ func New(config *Config) *analysis.Analyzer {
 	}
 }
 
+// DefaultConfig returns the default config for conncheck.
 func DefaultConfig() *Config {
 	return &Config{
 		Pkgs: stringSliceValue{
@@ -88,6 +92,7 @@ func DefaultConfig() *Config {
 	}
 }
 
+// Run runs the conncheck analyzer.
 func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 	if !cc.hasDbObj(pass) {
 		return nil, nil
@@ -131,7 +136,7 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
-// process checks if the call expression for SetConnMaxLifetime has a time
+// process checks if the CallExpr for SetConnMaxLifetime has a valid time
 // duration.
 func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.Node) {
 	if cc.config.printAST {
@@ -180,13 +185,11 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 		if err != nil {
 			pass.Report(*newDiagnostic(arg, err.Error()))
 		}
-
-		// default:
-		// 	fmt.Printf("Found an argument of an unknown kind: %T\n", arg)
-	} //nolint:wsl // ignore
+	}
 }
 
-// hasDbObj checks if the package uses one of the packages listed in Pkgs
+// hasDbObj checks if the package imports one of the packages listed in
+// config.Pkgs, otherwise it skips the file.
 func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	var dbObj types.Object
 
@@ -240,6 +243,8 @@ func (cc *connCheck) isValidIdent(ident *ast.Ident) error {
 	return nil
 }
 
+// isValidSelectorExpr checks if the selector is a time unit and is one of the
+// valid units. It also checks if the time is greater than the minimum required.
 func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 	unit, ok := cc.isTimeUnit(arg)
 	if !ok {
@@ -253,49 +258,6 @@ func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 	}
 
 	return nil
-}
-
-func (cc *connCheck) isTimeGreaterThanMin(arg *ast.BinaryExpr) (bool, error) {
-	// check for multiplication operator
-	if arg.Op != token.MUL {
-		return false, errNoCalc
-	}
-
-	hasUnit := false
-	hasInt := false
-
-	var intVal int64
-
-	// check for time units
-	unit, ok := cc.isTimeUnit(arg.X)
-	if ok {
-		hasUnit = true
-	} else {
-		unit, ok = cc.isTimeUnit(arg.Y)
-		if ok {
-			hasUnit = true
-		}
-	}
-
-	if !hasUnit {
-		return false, errNoCalc
-	}
-
-	// check for BasicLit
-	intVal, hasInt = binaryExprBasicLitToLit(arg)
-
-	// check for CallExpr
-	if !hasInt {
-		intVal, hasInt = binaryExprCallExprToLit(arg)
-	}
-
-	if !hasInt {
-		return false, errNoCalc
-	}
-
-	t := calcDuration(unit, intVal)
-
-	return t.Seconds() >= float64(cc.config.MinSeconds), nil
 }
 
 // isValidUnaryExpr checks if the unary expression has a subtraction operator.
@@ -344,51 +306,11 @@ func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) bool {
 }
 
 // isValidCallExpr checks if the call expression is a call to time.Duration
-// which could indicate that a time unit is missing.
+// which indicates that a time unit is missing.
 func (cc *connCheck) isValidCallExpr(arg *ast.CallExpr) error {
 	if isCallTimeDuration(arg) {
 		return errMissingUnit
 	}
 
 	return errPotentialMissingUnit
-}
-
-func isCallTimeDuration(arg *ast.CallExpr) bool {
-	selector, selectorOk := arg.Fun.(*ast.SelectorExpr)
-
-	if !selectorOk || selector.X == nil {
-		return false
-	}
-
-	ident, identOk := selector.X.(*ast.Ident)
-	if !identOk {
-		return false
-	}
-
-	return ident.Name == "time" && selector.Sel.Name == "Duration"
-}
-
-// isTimeUnit checks if the type is a time unit and is one of the ValidUnits /
-// validTimeUnits.
-func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
-	switch e := expr.(type) {
-	case *ast.SelectorExpr:
-		selector, selectorOk := expr.(*ast.SelectorExpr)
-		if !selectorOk || e.X == nil {
-			return "", false
-		}
-
-		ident, identOk := e.X.(*ast.Ident)
-		if !identOk {
-			return "", false
-		}
-
-		if ident.Name == "time" && slices.Contains(cc.config.ValidUnits.slice, selector.Sel.Name) {
-			return selector.Sel.Name, true
-		}
-	default:
-		return "", false
-	}
-
-	return "", false
 }

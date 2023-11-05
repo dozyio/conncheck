@@ -17,6 +17,8 @@ func invalidCases() { //nolint:unused // ignore
 	db.SetConnMaxLifetime(1 * time.Duration(60))          // want `missing a valid time unit`
 	db.SetConnMaxLifetime(time.Duration(timeoutNoUnit))   // want `missing a valid time unit`
 	db.SetConnMaxLifetime(time.Duration(1))               // want `missing a valid time unit`
+	db.SetConnMaxLifetime(1 * time.Nanosecond)            // want `missing a valid time unit`
+	db.SetConnMaxLifetime(1 * time.Microsecond)           // want `missing a valid time unit`
 	db.SetConnMaxLifetime(1 * time.Millisecond)           // want `missing a valid time unit`
 	db.SetConnMaxLifetime(returnTimeDuration())           // want `potentially missing a time unit`
 	db.SetConnMaxLifetime(+1)                             // want `operator is not -`
