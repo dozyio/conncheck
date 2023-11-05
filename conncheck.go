@@ -14,12 +14,11 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 )
 
-const minSecondsDefault = 60
-
 var (
-	pkgsDefault       = []string{"database/sql", "gorm.io/gorm"}
-	validUnitsDefault = []string{"Second", "Minute", "Hour"}
-	printASTDefault   = false
+	pkgsDefault              = []string{"database/sql", "gorm.io/gorm"}
+	validUnitsDefault        = []string{"Second", "Minute", "Hour"}
+	minSecondsDefault uint64 = 60
+	printASTDefault          = false
 
 	errMissingUnit          = errors.New("missing a valid time unit")
 	errOperator             = errors.New("operator is not -")
@@ -58,7 +57,7 @@ func (cc *connCheck) flags() flag.FlagSet {
 
 	flags.Var(&cc.config.Pkgs, "packages", "A comma-separated list of packages to check against")
 	flags.Var(&cc.config.ValidUnits, "timeunits", "A comma-separated list of time units to validate against")
-	flags.Uint64Var(&cc.config.MinSeconds, "minsec", minSecondsDefault, "The minimum seconds of SetConnMaxLifetime")
+	flags.Uint64Var(&cc.config.MinSeconds, "minsec", minSecondsDefault, "The minimum seconds for SetConnMaxLifetime")
 	flags.BoolVar(&cc.config.printAST, "printast", printASTDefault, "Print AST")
 
 	return *flags
@@ -90,10 +89,6 @@ func DefaultConfig() *Config {
 }
 
 func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
-	return cc.Start(pass)
-}
-
-func (cc *connCheck) Start(pass *analysis.Pass) (interface{}, error) {
 	if !cc.hasDbObj(pass) {
 		return nil, nil
 	}
@@ -194,6 +189,10 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 // hasDbObj checks if the package uses one of the packages listed in Pkgs
 func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	var dbObj types.Object
+
+	if pass.Pkg == nil {
+		return false
+	}
 
 	for _, pkg := range pass.Pkg.Imports() {
 		if slices.Contains(cc.config.Pkgs.slice, pkg.Path()) {
