@@ -30,9 +30,9 @@ var (
 )
 
 type Config struct {
-	pkgs       stringSliceValue
-	validUnits stringSliceValue
-	minSeconds uint64
+	Pkgs       stringSliceValue
+	ValidUnits stringSliceValue
+	MinSeconds uint64
 	printAST   bool
 }
 
@@ -54,11 +54,11 @@ func (cc *connCheck) flags() flag.FlagSet {
 		return *flags
 	}
 
-	cc.config = defaultConfig()
+	cc.config = DefaultConfig()
 
-	flags.Var(&cc.config.pkgs, "packages", "A comma-separated list of packages to check against")
-	flags.Var(&cc.config.validUnits, "timeunits", "A comma-separated list of time units to validate against")
-	flags.Uint64Var(&cc.config.minSeconds, "minsec", minSecondsDefault, "The minimum seconds of SetConnMaxLifetime")
+	flags.Var(&cc.config.Pkgs, "packages", "A comma-separated list of packages to check against")
+	flags.Var(&cc.config.ValidUnits, "timeunits", "A comma-separated list of time units to validate against")
+	flags.Uint64Var(&cc.config.MinSeconds, "minsec", minSecondsDefault, "The minimum seconds of SetConnMaxLifetime")
 	flags.BoolVar(&cc.config.printAST, "printast", printASTDefault, "Print AST")
 
 	return *flags
@@ -77,15 +77,15 @@ func New(config *Config) *analysis.Analyzer {
 	}
 }
 
-func defaultConfig() *Config {
+func DefaultConfig() *Config {
 	return &Config{
-		pkgs: stringSliceValue{
+		Pkgs: stringSliceValue{
 			slice: pkgsDefault,
 		},
-		validUnits: stringSliceValue{
+		ValidUnits: stringSliceValue{
 			slice: validUnitsDefault,
 		},
-		minSeconds: minSecondsDefault,
+		MinSeconds: minSecondsDefault,
 	}
 }
 
@@ -187,12 +187,12 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 	} //nolint:wsl // ignore
 }
 
-// hasDbObj checks if the package uses one of the packages listed in pkgs
+// hasDbObj checks if the package uses one of the packages listed in Pkgs
 func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	var dbObj types.Object
 
 	for _, pkg := range pass.Pkg.Imports() {
-		if slices.Contains(cc.config.pkgs.slice, pkg.Path()) {
+		if slices.Contains(cc.config.Pkgs.slice, pkg.Path()) {
 			dbObj = pkg.Scope().Lookup("DB")
 
 			if dbObj != nil {
@@ -245,7 +245,7 @@ func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 
 	t := calcDuration(unit, 1)
 
-	if t.Seconds() < float64(cc.config.minSeconds) {
+	if t.Seconds() < float64(cc.config.MinSeconds) {
 		return errCalcLessThanMin
 	}
 
@@ -292,7 +292,7 @@ func (cc *connCheck) isTimeGreaterThanMin(arg *ast.BinaryExpr) (bool, error) {
 
 	t := calcDuration(unit, intVal)
 
-	return t.Seconds() >= float64(cc.config.minSeconds), nil
+	return t.Seconds() >= float64(cc.config.MinSeconds), nil
 }
 
 // isValidUnaryExpr checks if the unary expression has a subtraction operator.
@@ -365,7 +365,7 @@ func isCallTimeDuration(arg *ast.CallExpr) bool {
 	return ident.Name == "time" && selector.Sel.Name == "Duration"
 }
 
-// isTimeUnit checks if the type is a time unit and is one of the validUnits /
+// isTimeUnit checks if the type is a time unit and is one of the ValidUnits /
 // validTimeUnits.
 func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 	switch e := expr.(type) {
@@ -380,7 +380,7 @@ func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 			return "", false
 		}
 
-		if ident.Name == "time" && slices.Contains(cc.config.validUnits.slice, selector.Sel.Name) {
+		if ident.Name == "time" && slices.Contains(cc.config.ValidUnits.slice, selector.Sel.Name) {
 			return selector.Sel.Name, true
 		}
 	default:
