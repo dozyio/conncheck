@@ -30,6 +30,10 @@ func (ss *stringSliceValue) String() string {
 	return strings.Join(ss.slice, ",")
 }
 
+func (ss *stringSliceValue) SetSlice(s []string) {
+	ss.slice = append(ss.slice, s...)
+}
+
 func newDiagnostic(arg ast.Expr, message string) *analysis.Diagnostic {
 	return &analysis.Diagnostic{
 		Pos:     arg.Pos(),

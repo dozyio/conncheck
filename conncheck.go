@@ -40,7 +40,7 @@ type connCheck struct {
 	config *Config
 }
 
-func newConncheck(config *Config) *connCheck {
+func NewConncheck(config *Config) *connCheck {
 	return &connCheck{
 		config: config,
 	}
@@ -66,11 +66,11 @@ func (cc *connCheck) flags() flag.FlagSet {
 
 // New creates a new conncheck analyzer.
 func New(config *Config) *analysis.Analyzer {
-	cc := newConncheck(config)
+	cc := NewConncheck(config)
 
 	return &analysis.Analyzer{
 		Name:     "conncheck",
-		Doc:      "checks db.SetConnMaxLifetime is set to a reasonable value",
+		Doc:      "Conncheck checks db.SetConnMaxLifetime is set to a reasonable value",
 		Requires: []*analysis.Analyzer{inspect.Analyzer},
 		Run:      cc.run,
 		Flags:    cc.flags(),
@@ -90,6 +90,10 @@ func DefaultConfig() *Config {
 }
 
 func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
+	return cc.Start(pass)
+}
+
+func (cc *connCheck) Start(pass *analysis.Pass) (interface{}, error) {
 	if !cc.hasDbObj(pass) {
 		return nil, nil
 	}
