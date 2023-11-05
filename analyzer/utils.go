@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/go/analysis"
 )
@@ -50,7 +51,7 @@ func formatNode(node ast.Node) string {
 func printAST(node ast.Node) {
 	fmt.Printf(">>>\n%s\n\n\n", formatNode(node))
 
-	_ = ast.Fprint(os.Stdout, nil, node, nil) //nolint:errcheck // ignore
+	_ = ast.Fprint(os.Stdout, nil, node, nil)
 
 	fmt.Println("--------------")
 }
@@ -62,4 +63,25 @@ func basicLitValue(arg *ast.BasicLit) (int64, bool) {
 	}
 
 	return intVal, true
+}
+
+func calcDuration(unit string, val int64) time.Duration {
+	var t time.Duration
+
+	switch unit {
+	case "Nanosecond":
+		t = time.Duration(val) * time.Nanosecond
+	case "Microsecond":
+		t = time.Duration(val) * time.Microsecond
+	case "Millisecond":
+		t = time.Duration(val) * time.Millisecond
+	case "Second":
+		t = time.Duration(val) * time.Second
+	case "Minute":
+		t = time.Duration(val) * time.Minute
+	case "Hour":
+		t = time.Duration(val) * time.Hour
+	}
+
+	return t
 }

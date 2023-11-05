@@ -3,13 +3,11 @@ package analyzer
 import (
 	"errors"
 	"flag"
-	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
 	"slices"
 	"strconv"
-	"time"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -19,7 +17,7 @@ import (
 const minSecondsDefault = 60
 
 var (
-	debugDefault            = true
+	debugDefault            = false
 	pkgsDefault             = []string{"database/sql", "gorm.io/gorm"}
 	validUnitsDefault       = []string{"Second", "Minute", "Hour"}
 	errMissingUnit          = errors.New("missing a valid time unit")
@@ -27,6 +25,7 @@ var (
 	errPotentialMissingUnit = errors.New("potentially missing a time unit")
 	errCalcLessThanMin      = errors.New("time is less than minimum required")
 	errNoCalc               = errors.New("can't calculate time")
+	errInvalidParam         = errors.New("invalid parameter")
 )
 
 type Settings struct {
@@ -126,6 +125,10 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 // process checks if the call expression for SetConnMaxLifetime has a time
 // duration.
 func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.Node) {
+	if cc.settings.debug {
+		printAST(node)
+	}
+
 	arg := call.Args[0]
 
 	switch arg := arg.(type) {
@@ -139,16 +142,12 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 			pass.Report(*newDiagnostic(arg, errOperator.Error()))
 		}
 
-	case *ast.BinaryExpr: //nolint:wsl // ignore
-		// if cc.settings.debug {
-		// 	printAST(node)
-		// }
-
-		if !cc.isValidBinaryExpr(pass, arg) {
+	case *ast.BinaryExpr:
+		if !cc.isValidBinaryExpr(arg) {
 			pass.Report(*newDiagnostic(arg, errMissingUnit.Error()))
 		}
 
-		res, err := cc.isTimeGreaterThanMinimum(pass, arg)
+		res, err := cc.isTimeGreaterThanMinimumBinaryExpr(arg)
 		if err == nil {
 			if !res {
 				pass.Report(*newDiagnostic(arg, errCalcLessThanMin.Error()))
@@ -161,12 +160,18 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 			pass.Report(*newDiagnostic(arg, err.Error()))
 		}
 
-		// case *ast.SelectorExpr:
-		// 	fmt.Printf("Found SelectorExpr: %+v\n", arg)
-		//
-		// case *ast.Ident:
-		// 	fmt.Printf("Found Ident: %v\n", arg.Name)
-		//
+	case *ast.SelectorExpr:
+		err := cc.isValidSelectorExpr(arg)
+		if err != nil {
+			pass.Report(*newDiagnostic(arg, err.Error()))
+		}
+
+	case *ast.Ident:
+		err := cc.isValidIdent(arg)
+		if err != nil {
+			pass.Report(*newDiagnostic(arg, err.Error()))
+		}
+
 		// default:
 		// 	fmt.Printf("Found an argument of an unknown kind: %T\n", arg)
 	} //nolint:wsl // ignore
@@ -186,7 +191,55 @@ func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	return dbObj != nil
 }
 
-func (cc *connCheck) isTimeGreaterThanMinimum(pass *analysis.Pass, arg *ast.BinaryExpr) (bool, error) {
+func (cc *connCheck) isValidIdent(ident *ast.Ident) error {
+	if ident.Obj.Kind != ast.Var {
+		return nil
+	}
+
+	if ident.Obj.Decl == nil {
+		return nil
+	}
+
+	decl, declOk := ident.Obj.Decl.(*ast.AssignStmt)
+	if !declOk {
+		return nil
+	}
+
+	if len(decl.Rhs) != 1 {
+		return nil
+	}
+
+	rhs, rhsOk := decl.Rhs[0].(*ast.BinaryExpr)
+	if !rhsOk {
+		return nil
+	}
+
+	res, err := cc.isTimeGreaterThanMinimumBinaryExpr(rhs)
+	if err == nil {
+		if !res {
+			return errCalcLessThanMin
+		}
+	}
+
+	return nil
+}
+
+func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
+	unit, ok := cc.isTimeUnit(arg)
+	if !ok {
+		return errInvalidParam
+	}
+
+	t := calcDuration(unit, 1)
+
+	if t.Seconds() < float64(cc.settings.minSeconds) {
+		return errCalcLessThanMin
+	}
+
+	return nil
+}
+
+func (cc *connCheck) isTimeGreaterThanMinimumBinaryExpr(arg *ast.BinaryExpr) (bool, error) {
 	// check for multiplication operator
 	if arg.Op != token.MUL {
 		return false, errNoCalc
@@ -200,13 +253,13 @@ func (cc *connCheck) isTimeGreaterThanMinimum(pass *analysis.Pass, arg *ast.Bina
 	var intVal int64
 
 	// check for time units
-	unit, ok := cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.X), arg.X)
+	unit, ok := cc.isTimeUnit(arg.X)
 	if ok {
 		hasUnitX = true
 	}
 
 	if !ok {
-		unit, ok = cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.Y), arg.Y)
+		unit, ok = cc.isTimeUnit(arg.Y)
 		if ok {
 			hasUnitY = true
 		}
@@ -270,26 +323,7 @@ func (cc *connCheck) isTimeGreaterThanMinimum(pass *analysis.Pass, arg *ast.Bina
 		return false, errNoCalc
 	}
 
-	var t time.Duration
-
-	switch unit {
-	case "Nanosecond":
-		t = time.Duration(intVal) * time.Nanosecond
-	case "Microsecond":
-		t = time.Duration(intVal) * time.Microsecond
-	case "Millisecond":
-		t = time.Duration(intVal) * time.Millisecond
-	case "Second":
-		t = time.Duration(intVal) * time.Second
-	case "Minute":
-		t = time.Duration(intVal) * time.Minute
-	case "Hour":
-		t = time.Duration(intVal) * time.Hour
-	}
-
-	if cc.settings.debug {
-		fmt.Printf("time: %v\n", t.Seconds())
-	}
+	t := calcDuration(unit, intVal)
 
 	if t.Seconds() < float64(cc.settings.minSeconds) {
 		return false, nil
@@ -325,16 +359,16 @@ func (cc *connCheck) isValidBasicLit(arg *ast.BasicLit) bool {
 
 // isValidBinaryExpr checks if the binary expression contains a time unit which
 // would indicate that the duration is set correctly.
-func (cc *connCheck) isValidBinaryExpr(pass *analysis.Pass, arg *ast.BinaryExpr) bool {
+func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) bool {
 	hasUnit := false
 
 	if arg.Op == token.MUL {
-		_, ok := cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.X), arg.X)
+		_, ok := cc.isTimeUnit(arg.X)
 		if ok {
 			hasUnit = true
 		}
 
-		_, ok = cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.Y), arg.Y)
+		_, ok = cc.isTimeUnit(arg.Y)
 		if ok {
 			hasUnit = true
 		}
@@ -370,7 +404,7 @@ func isCallTimeDuration(arg *ast.CallExpr) bool {
 
 // isTimeUnit checks if the type is a time unit and is one of the validUnits /
 // validTimeUnits.
-func (cc *connCheck) isTimeUnit(x types.Type, expr ast.Expr) (string, bool) {
+func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 	switch e := expr.(type) {
 	case *ast.SelectorExpr:
 		selector, selectorOk := expr.(*ast.SelectorExpr)

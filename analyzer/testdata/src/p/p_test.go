@@ -10,6 +10,7 @@ func invalidCases() { //nolint:unused // ignore
 
 	timeoutNoUnit := 1
 	timeoutWithUnit := 1 * time.Second
+	timeoutWithUnit2 := time.Second * 1
 
 	db.SetConnMaxLifetime(1)                              // want `missing a valid time unit`
 	db.SetConnMaxLifetime(1 * 60)                         // want `missing a valid time unit`
@@ -24,6 +25,7 @@ func invalidCases() { //nolint:unused // ignore
 	db.SetConnMaxLifetime(time.Duration(1) * time.Second) // want `time is less than minimum required`
 	db.SetConnMaxLifetime(time.Second * time.Duration(1)) // want `time is less than minimum required`
 	db.SetConnMaxLifetime(timeoutWithUnit)                // want `time is less than minimum required`
+	db.SetConnMaxLifetime(timeoutWithUnit2)               // want `time is less than minimum required`
 	db.SetConnMaxLifetime(time.Second)                    // want `time is less than minimum required`
 }
 
@@ -31,6 +33,7 @@ func validCases() { //nolint:unused // ignore
 	db, _ := sql.Open("fake", "user:password@/dbname")
 
 	timeoutWithUnit := 60 * time.Second
+	timeoutWithUnit2 := time.Second * 60
 
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxLifetime(-1)
@@ -47,6 +50,7 @@ func validCases() { //nolint:unused // ignore
 	db.SetConnMaxLifetime(time.Minute * time.Duration(1))
 	db.SetConnMaxLifetime(time.Hour * time.Duration(1))
 	db.SetConnMaxLifetime(timeoutWithUnit)
+	db.SetConnMaxLifetime(timeoutWithUnit2)
 	db.SetConnMaxLifetime(time.Minute)
 }
 
