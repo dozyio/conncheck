@@ -1,4 +1,4 @@
-package analyzer
+package conncheck
 
 import (
 	"errors"
@@ -39,7 +39,7 @@ type connCheck struct {
 	settings *Settings
 }
 
-func newConnCheck(settings *Settings) *connCheck {
+func newConncheck(settings *Settings) *connCheck {
 	return &connCheck{
 		settings: settings,
 	}
@@ -68,7 +68,7 @@ func New() *analysis.Analyzer {
 		minSeconds: minSecondsDefault,
 	}
 
-	cc := newConnCheck(settings)
+	cc := newConncheck(settings)
 
 	return &analysis.Analyzer{
 		Name:     "conncheck",
@@ -147,7 +147,7 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 			pass.Report(*newDiagnostic(arg, errMissingUnit.Error()))
 		}
 
-		res, err := cc.isTimeGreaterThanMinimumBinaryExpr(arg)
+		res, err := cc.isTimeGreaterThanMin(arg)
 		if err == nil {
 			if !res {
 				pass.Report(*newDiagnostic(arg, errCalcLessThanMin.Error()))
@@ -184,11 +184,14 @@ func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	for _, pkg := range pass.Pkg.Imports() {
 		if slices.Contains(cc.settings.pkgs.slice, pkg.Path()) {
 			dbObj = pkg.Scope().Lookup("DB")
-			break
+
+			if dbObj != nil {
+				return true
+			}
 		}
 	}
 
-	return dbObj != nil
+	return false
 }
 
 func (cc *connCheck) isValidIdent(ident *ast.Ident) error {
@@ -214,7 +217,7 @@ func (cc *connCheck) isValidIdent(ident *ast.Ident) error {
 		return nil
 	}
 
-	res, err := cc.isTimeGreaterThanMinimumBinaryExpr(rhs)
+	res, err := cc.isTimeGreaterThanMin(rhs)
 	if err == nil {
 		if !res {
 			return errCalcLessThanMin
@@ -239,101 +242,51 @@ func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 	return nil
 }
 
-func (cc *connCheck) isTimeGreaterThanMinimumBinaryExpr(arg *ast.BinaryExpr) (bool, error) {
+func (cc *connCheck) isTimeGreaterThanMin(arg *ast.BinaryExpr) (bool, error) {
 	// check for multiplication operator
 	if arg.Op != token.MUL {
 		return false, errNoCalc
 	}
 
-	hasUnitX := false
-	hasUnitY := false
-	hasIntX := false
-	hasIntY := false
+	hasUnit := false
+	hasInt := false
 
 	var intVal int64
 
 	// check for time units
 	unit, ok := cc.isTimeUnit(arg.X)
 	if ok {
-		hasUnitX = true
-	}
-
-	if !ok {
+		hasUnit = true
+	} else {
 		unit, ok = cc.isTimeUnit(arg.Y)
 		if ok {
-			hasUnitY = true
+			hasUnit = true
 		}
 	}
 
-	if !hasUnitX && !hasUnitY {
+	if !hasUnit {
 		return false, errNoCalc
 	}
 
-	// check for basic literals
-	xInt, xIntOk := arg.X.(*ast.BasicLit)
-	if xIntOk {
-		intVal, ok = basicLitValue(xInt)
-
-		if ok {
-			hasIntX = true
-		}
-	}
-
-	yInt, yIntOk := arg.Y.(*ast.BasicLit)
-	if yIntOk {
-		intVal, ok = basicLitValue(yInt)
-
-		if ok {
-			hasIntY = true
-		}
-	}
+	// check for BasicLit
+	intVal, hasInt = binaryExprBasicLitToLit(arg)
 
 	// check for CallExpr
-	if !hasIntX && !hasIntY {
-		xCall, xCallOk := arg.X.(*ast.CallExpr)
-		if xCallOk {
-			if isCallTimeDuration(xCall) {
-				xInt, xIntOk := xCall.Args[0].(*ast.BasicLit)
-				if xIntOk {
-					intVal, ok = basicLitValue(xInt)
-
-					if ok {
-						hasIntX = true
-					}
-				}
-			}
-		}
-
-		yCall, yCallOk := arg.Y.(*ast.CallExpr)
-		if yCallOk {
-			if isCallTimeDuration(yCall) {
-				yInt, yIntOk := yCall.Args[0].(*ast.BasicLit)
-				if yIntOk {
-					intVal, ok = basicLitValue(yInt)
-
-					if ok {
-						hasIntY = true
-					}
-				}
-			}
-		}
+	if !hasInt {
+		intVal, hasInt = binaryExprCallExprToLit(arg)
 	}
 
-	if !hasIntX && !hasIntY {
+	if !hasInt {
 		return false, errNoCalc
 	}
 
 	t := calcDuration(unit, intVal)
 
-	if t.Seconds() < float64(cc.settings.minSeconds) {
-		return false, nil
-	}
-
-	return true, nil
+	return t.Seconds() >= float64(cc.settings.minSeconds), nil
 }
 
 // isValidUnaryExpr checks if the unary expression has a subtraction operator.
-// This would indicate that the connection should not be closed.
+// This indicates that the connection should not be closed.
 // https://pkg.go.dev/database/sql#DB.SetConnMaxLifetime
 func (cc *connCheck) isValidUnaryExpr(arg *ast.UnaryExpr) bool {
 	return arg.Op == token.SUB

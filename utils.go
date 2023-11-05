@@ -1,4 +1,4 @@
-package analyzer
+package conncheck
 
 import (
 	"bytes"
@@ -59,6 +59,70 @@ func printAST(node ast.Node) {
 func basicLitValue(arg *ast.BasicLit) (int64, bool) {
 	intVal, err := strconv.ParseInt(arg.Value, 10, 64)
 	if err != nil {
+		return 0, false
+	}
+
+	return intVal, true
+}
+
+func binaryExprBasicLitToLit(arg *ast.BinaryExpr) (int64, bool) {
+	lit, litOk := arg.X.(*ast.BasicLit)
+	if litOk {
+		intVal, ok := basicLitValue(lit)
+
+		if ok {
+			return intVal, true
+		}
+	}
+
+	lit, litOk = arg.Y.(*ast.BasicLit)
+	if litOk {
+		intVal, ok := basicLitValue(lit)
+
+		if ok {
+			return intVal, true
+		}
+	}
+
+	return 0, false
+}
+
+func binaryExprCallExprToLit(arg *ast.BinaryExpr) (int64, bool) {
+	call, callOk := arg.X.(*ast.CallExpr)
+	if callOk {
+		intVal, ok := callExprToLit(call)
+		if ok {
+			return intVal, true
+		}
+	}
+
+	call, callOk = arg.Y.(*ast.CallExpr)
+	if callOk {
+		intVal, ok := callExprToLit(call)
+		if ok {
+			return intVal, true
+		}
+	}
+
+	return 0, false
+}
+
+func callExprToLit(call *ast.CallExpr) (int64, bool) {
+	if len(call.Args) != 1 {
+		return 0, false
+	}
+
+	if !isCallTimeDuration(call) {
+		return 0, false
+	}
+
+	lit, litOk := call.Args[0].(*ast.BasicLit)
+	if !litOk {
+		return 0, false
+	}
+
+	intVal, ok := basicLitValue(lit)
+	if !ok {
 		return 0, false
 	}
 
