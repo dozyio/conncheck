@@ -1,50 +1,87 @@
 package analyzer
 
 import (
-	"bytes"
+	"errors"
+	"flag"
+	"fmt"
 	"go/ast"
-	"go/format"
 	"go/token"
 	"go/types"
-	"log"
 	"slices"
 	"strconv"
+	"time"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 )
 
-type connCheck struct{}
-
-const (
-	missingUnitErr = "include a time unit e.g. time.Second"
-	operatorErr    = "operator is not -"
-)
+const minSecondsDefault = 60
 
 var (
-	validUnits     = []string{"Second", "Minute", "Hour"}
-	validTimeUnits = []string{"time.Second", "time.Minute", "time.Hour"}
+	debugDefault            = true
+	pkgsDefault             = []string{"database/sql", "gorm.io/gorm"}
+	validUnitsDefault       = []string{"Second", "Minute", "Hour"}
+	errMissingUnit          = errors.New("missing a valid time unit")
+	errOperator             = errors.New("operator is not -")
+	errPotentialMissingUnit = errors.New("potentially missing a time unit")
+	errCalcLessThanMin      = errors.New("time is less than minimum required")
+	errNoCalc               = errors.New("can't calculate time")
 )
 
-func newConnCheck() *connCheck {
-	return &connCheck{}
+type Settings struct {
+	pkgs       stringSliceValue
+	validUnits stringSliceValue
+	minSeconds uint64
+	debug      bool
 }
 
-// New creates a new db-lifetime analyzer.
+type connCheck struct {
+	settings *Settings
+}
+
+func newConnCheck(settings *Settings) *connCheck {
+	return &connCheck{
+		settings: settings,
+	}
+}
+
+func (cc *connCheck) flags() flag.FlagSet {
+	flags := flag.NewFlagSet("", flag.ExitOnError)
+
+	flags.Var(&cc.settings.pkgs, "packages", "A comma-separated list of packages to check against")
+	flags.Var(&cc.settings.validUnits, "timeunits", "A comma-separated list of time units to validate against")
+	flags.Uint64Var(&cc.settings.minSeconds, "minsec", minSecondsDefault, "The minimum seconds of SetConnMaxLifetime")
+	flags.BoolVar(&cc.settings.debug, "debug", debugDefault, "Debug")
+
+	return *flags
+}
+
+// New creates a new conncheck analyzer.
 func New() *analysis.Analyzer {
-	cc := newConnCheck()
+	settings := &Settings{
+		pkgs: stringSliceValue{
+			slice: pkgsDefault,
+		},
+		validUnits: stringSliceValue{
+			slice: validUnitsDefault,
+		},
+		minSeconds: minSecondsDefault,
+	}
+
+	cc := newConnCheck(settings)
 
 	return &analysis.Analyzer{
 		Name:     "conncheck",
 		Doc:      "checks db.SetConnMaxLifetime is set to a reasonable value",
 		Requires: []*analysis.Analyzer{inspect.Analyzer},
 		Run:      cc.run,
+		Flags:    cc.flags(),
 	}
 }
 
 func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
-	if !hasDbObj(pass) {
+	if !cc.hasDbObj(pass) {
 		return nil, nil
 	}
 
@@ -67,42 +104,61 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 		if !selectorOk || selector.X == nil {
 			return
 		}
+		if selector.Sel.Name != "SetConnMaxLifetime" {
+			return
+		}
 
 		ident, identOk := selector.X.(*ast.Ident)
 		if !identOk {
 			return
 		}
 
-		if ident.Name != "db" || selector.Sel.Name != "SetConnMaxLifetime" {
+		if pass.TypesInfo.TypeOf(ident).String() != "*database/sql.DB" {
 			return
 		}
 
-		checkArg(pass, call, call.Args[0])
+		cc.process(pass, call, node)
 	})
 
 	return nil, nil
 }
 
-func checkArg(pass *analysis.Pass, call *ast.CallExpr, arg ast.Expr) {
+// process checks if the call expression for SetConnMaxLifetime has a time
+// duration.
+func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.Node) {
+	arg := call.Args[0]
+
 	switch arg := arg.(type) {
 	case *ast.BasicLit:
-		if !isValidBasicLit(arg) {
-			pass.Reportf(call.Pos(), "%s: `%s`", missingUnitErr, formatNode(call))
+		if !cc.isValidBasicLit(arg) {
+			pass.Report(*newDiagnostic(arg, errMissingUnit.Error()))
 		}
 
 	case *ast.UnaryExpr:
-		if !isValidUnaryExpr(arg) {
-			pass.Reportf(call.Pos(), "%s: `%s`", operatorErr, formatNode(call))
+		if !cc.isValidUnaryExpr(arg) {
+			pass.Report(*newDiagnostic(arg, errOperator.Error()))
 		}
 
-	case *ast.BinaryExpr:
-		if !isValidBinaryExpr(arg, pass) {
-			pass.Reportf(call.Pos(), "%s: `%s`", missingUnitErr, formatNode(call))
+	case *ast.BinaryExpr: //nolint:wsl // ignore
+		// if cc.settings.debug {
+		// 	printAST(node)
+		// }
+
+		if !cc.isValidBinaryExpr(pass, arg) {
+			pass.Report(*newDiagnostic(arg, errMissingUnit.Error()))
+		}
+
+		res, err := cc.isTimeGreaterThanMinimum(pass, arg)
+		if err == nil {
+			if !res {
+				pass.Report(*newDiagnostic(arg, errCalcLessThanMin.Error()))
+			}
 		}
 
 	case *ast.CallExpr:
-		if !isValidCallExpr(arg) {
-			pass.Reportf(call.Pos(), "%s: `%s`", missingUnitErr, formatNode(call))
+		err := cc.isValidCallExpr(arg)
+		if err != nil {
+			pass.Report(*newDiagnostic(arg, err.Error()))
 		}
 
 		// case *ast.SelectorExpr:
@@ -116,11 +172,12 @@ func checkArg(pass *analysis.Pass, call *ast.CallExpr, arg ast.Expr) {
 	} //nolint:wsl // ignore
 }
 
-func hasDbObj(pass *analysis.Pass) bool {
+// hasDbObj checks if the package uses one of the packages listed in pkgs
+func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	var dbObj types.Object
 
 	for _, pkg := range pass.Pkg.Imports() {
-		if pkg.Path() == "database/sql" {
+		if slices.Contains(cc.settings.pkgs.slice, pkg.Path()) {
 			dbObj = pkg.Scope().Lookup("DB")
 			break
 		}
@@ -129,11 +186,129 @@ func hasDbObj(pass *analysis.Pass) bool {
 	return dbObj != nil
 }
 
-func isValidUnaryExpr(arg *ast.UnaryExpr) bool {
+func (cc *connCheck) isTimeGreaterThanMinimum(pass *analysis.Pass, arg *ast.BinaryExpr) (bool, error) {
+	// check for multiplication operator
+	if arg.Op != token.MUL {
+		return false, errNoCalc
+	}
+
+	hasUnitX := false
+	hasUnitY := false
+	hasIntX := false
+	hasIntY := false
+
+	var intVal int64
+
+	// check for time units
+	unit, ok := cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.X), arg.X)
+	if ok {
+		hasUnitX = true
+	}
+
+	if !ok {
+		unit, ok = cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.Y), arg.Y)
+		if ok {
+			hasUnitY = true
+		}
+	}
+
+	if !hasUnitX && !hasUnitY {
+		return false, errNoCalc
+	}
+
+	// check for basic literals
+	xInt, xIntOk := arg.X.(*ast.BasicLit)
+	if xIntOk {
+		intVal, ok = basicLitValue(xInt)
+
+		if ok {
+			hasIntX = true
+		}
+	}
+
+	yInt, yIntOk := arg.Y.(*ast.BasicLit)
+	if yIntOk {
+		intVal, ok = basicLitValue(yInt)
+
+		if ok {
+			hasIntY = true
+		}
+	}
+
+	// check for CallExpr
+	if !hasIntX && !hasIntY {
+		xCall, xCallOk := arg.X.(*ast.CallExpr)
+		if xCallOk {
+			if isCallTimeDuration(xCall) {
+				xInt, xIntOk := xCall.Args[0].(*ast.BasicLit)
+				if xIntOk {
+					intVal, ok = basicLitValue(xInt)
+
+					if ok {
+						hasIntX = true
+					}
+				}
+			}
+		}
+
+		yCall, yCallOk := arg.Y.(*ast.CallExpr)
+		if yCallOk {
+			if isCallTimeDuration(yCall) {
+				yInt, yIntOk := yCall.Args[0].(*ast.BasicLit)
+				if yIntOk {
+					intVal, ok = basicLitValue(yInt)
+
+					if ok {
+						hasIntY = true
+					}
+				}
+			}
+		}
+	}
+
+	if !hasIntX && !hasIntY {
+		return false, errNoCalc
+	}
+
+	var t time.Duration
+
+	switch unit {
+	case "Nanosecond":
+		t = time.Duration(intVal) * time.Nanosecond
+	case "Microsecond":
+		t = time.Duration(intVal) * time.Microsecond
+	case "Millisecond":
+		t = time.Duration(intVal) * time.Millisecond
+	case "Second":
+		t = time.Duration(intVal) * time.Second
+	case "Minute":
+		t = time.Duration(intVal) * time.Minute
+	case "Hour":
+		t = time.Duration(intVal) * time.Hour
+	}
+
+	if cc.settings.debug {
+		fmt.Printf("time: %v\n", t.Seconds())
+	}
+
+	if t.Seconds() < float64(cc.settings.minSeconds) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// isValidUnaryExpr checks if the unary expression has a subtraction operator.
+// This would indicate that the connection should not be closed.
+// https://pkg.go.dev/database/sql#DB.SetConnMaxLifetime
+func (cc *connCheck) isValidUnaryExpr(arg *ast.UnaryExpr) bool {
 	return arg.Op == token.SUB
 }
 
-func isValidBasicLit(arg *ast.BasicLit) bool {
+// isValidBasicLit checks if the basic literal is larger than 0 which would
+// could indicate that the user forgot to add a time unit as the duration is in
+// nano seconds.
+func (cc *connCheck) isValidBasicLit(arg *ast.BasicLit) bool {
 	if arg.Kind == token.INT {
 		v, err := strconv.Atoi(arg.Value)
 		if err != nil {
@@ -148,80 +323,72 @@ func isValidBasicLit(arg *ast.BasicLit) bool {
 	return true
 }
 
-func isValidBinaryExpr(arg *ast.BinaryExpr, pass *analysis.Pass) bool {
-	isUnit := false
+// isValidBinaryExpr checks if the binary expression contains a time unit which
+// would indicate that the duration is set correctly.
+func (cc *connCheck) isValidBinaryExpr(pass *analysis.Pass, arg *ast.BinaryExpr) bool {
+	hasUnit := false
 
 	if arg.Op == token.MUL {
-		if isTimeUnit(pass.TypesInfo.TypeOf(arg.X), arg.X) {
-			isUnit = true
+		_, ok := cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.X), arg.X)
+		if ok {
+			hasUnit = true
 		}
 
-		if isTimeUnit(pass.TypesInfo.TypeOf(arg.Y), arg.Y) {
-			isUnit = true
+		_, ok = cc.isTimeUnit(pass.TypesInfo.TypeOf(arg.Y), arg.Y)
+		if ok {
+			hasUnit = true
 		}
 	}
 
-	return isUnit
+	return hasUnit
 }
 
-func isValidCallExpr(arg *ast.CallExpr) bool {
+// isValidCallExpr checks if the call expression is a call to time.Duration
+// which could indicate that a time unit is missing.
+func (cc *connCheck) isValidCallExpr(arg *ast.CallExpr) error {
+	if isCallTimeDuration(arg) {
+		return errMissingUnit
+	}
+
+	return errPotentialMissingUnit
+}
+
+func isCallTimeDuration(arg *ast.CallExpr) bool {
 	selector, selectorOk := arg.Fun.(*ast.SelectorExpr)
+
 	if !selectorOk || selector.X == nil {
-		return true
+		return false
 	}
 
 	ident, identOk := selector.X.(*ast.Ident)
 	if !identOk {
-		return true
-	}
-
-	if ident.Name == "time" && selector.Sel.Name == "Duration" {
 		return false
 	}
 
-	return true
+	return ident.Name == "time" && selector.Sel.Name == "Duration"
 }
 
-func formatNode(node ast.Node) string {
-	buf := new(bytes.Buffer)
-
-	err := format.Node(buf, token.NewFileSet(), node)
-	if err != nil {
-		log.Printf("error formatting expression: %v", err)
-		return ""
-	}
-
-	return buf.String()
-}
-
-/* func printAST(node ast.Node) {
-	fmt.Printf(">>>\n%s\n\n", formatNode(node))
-
-	err := ast.Fprint(os.Stdout, nil, node, nil)
-	if err != nil {
-		fmt.Printf("error priting node: %v\n", err)
-	}
-} */
-
-func isTimeUnit(x types.Type, expr ast.Expr) bool {
+// isTimeUnit checks if the type is a time unit and is one of the validUnits /
+// validTimeUnits.
+func (cc *connCheck) isTimeUnit(x types.Type, expr ast.Expr) (string, bool) {
 	switch e := expr.(type) {
 	case *ast.SelectorExpr:
 		selector, selectorOk := expr.(*ast.SelectorExpr)
 		if !selectorOk || e.X == nil {
-			return false
+			return "", false
 		}
 
 		ident, identOk := e.X.(*ast.Ident)
 		if !identOk {
-			return false
+			return "", false
 		}
 
-		if ident.Name == "time" && slices.Contains(validUnits, selector.Sel.Name) {
-			return true
+		if ident.Name == "time" && slices.Contains(cc.settings.validUnits.slice, selector.Sel.Name) {
+			return selector.Sel.Name, true
 		}
 	default:
+		return "", false
 	}
 
-	// Fallback to checking the type by string
-	return slices.Contains(validTimeUnits, x.String())
+	return "", false
 }
