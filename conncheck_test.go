@@ -8,5 +8,5 @@ import (
 )
 
 func TestAnalyzer(t *testing.T) {
-	analysistest.Run(t, analysistest.TestData(), conncheck.New(), "p")
+	analysistest.Run(t, analysistest.TestData(), conncheck.New(nil), "p")
 }

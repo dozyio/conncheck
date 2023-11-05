@@ -15,5 +15,5 @@ test:
 	go test -v ./...
 
 install:
-	go install -ldflags '-s -w' .
+	go install -ldflags '-s -w' ./cmd/conncheck
 	conncheck -h 2>&1 | head -n1

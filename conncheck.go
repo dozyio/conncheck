@@ -17,9 +17,10 @@ import (
 const minSecondsDefault = 60
 
 var (
-	debugDefault            = false
-	pkgsDefault             = []string{"database/sql", "gorm.io/gorm"}
-	validUnitsDefault       = []string{"Second", "Minute", "Hour"}
+	pkgsDefault       = []string{"database/sql", "gorm.io/gorm"}
+	validUnitsDefault = []string{"Second", "Minute", "Hour"}
+	printASTDefault   = false
+
 	errMissingUnit          = errors.New("missing a valid time unit")
 	errOperator             = errors.New("operator is not -")
 	errPotentialMissingUnit = errors.New("potentially missing a time unit")
@@ -28,47 +29,44 @@ var (
 	errInvalidParam         = errors.New("invalid parameter")
 )
 
-type Settings struct {
+type Config struct {
 	pkgs       stringSliceValue
 	validUnits stringSliceValue
 	minSeconds uint64
-	debug      bool
+	printAST   bool
 }
 
 type connCheck struct {
-	settings *Settings
+	config *Config
 }
 
-func newConncheck(settings *Settings) *connCheck {
+func newConncheck(config *Config) *connCheck {
 	return &connCheck{
-		settings: settings,
+		config: config,
 	}
 }
 
 func (cc *connCheck) flags() flag.FlagSet {
 	flags := flag.NewFlagSet("", flag.ExitOnError)
 
-	flags.Var(&cc.settings.pkgs, "packages", "A comma-separated list of packages to check against")
-	flags.Var(&cc.settings.validUnits, "timeunits", "A comma-separated list of time units to validate against")
-	flags.Uint64Var(&cc.settings.minSeconds, "minsec", minSecondsDefault, "The minimum seconds of SetConnMaxLifetime")
-	flags.BoolVar(&cc.settings.debug, "debug", debugDefault, "Debug")
+	// If we have a config, we're not running from cli so don't use any flags
+	if cc.config != nil {
+		return *flags
+	}
+
+	cc.config = defaultConfig()
+
+	flags.Var(&cc.config.pkgs, "packages", "A comma-separated list of packages to check against")
+	flags.Var(&cc.config.validUnits, "timeunits", "A comma-separated list of time units to validate against")
+	flags.Uint64Var(&cc.config.minSeconds, "minsec", minSecondsDefault, "The minimum seconds of SetConnMaxLifetime")
+	flags.BoolVar(&cc.config.printAST, "printast", printASTDefault, "Print AST")
 
 	return *flags
 }
 
 // New creates a new conncheck analyzer.
-func New() *analysis.Analyzer {
-	settings := &Settings{
-		pkgs: stringSliceValue{
-			slice: pkgsDefault,
-		},
-		validUnits: stringSliceValue{
-			slice: validUnitsDefault,
-		},
-		minSeconds: minSecondsDefault,
-	}
-
-	cc := newConncheck(settings)
+func New(config *Config) *analysis.Analyzer {
+	cc := newConncheck(config)
 
 	return &analysis.Analyzer{
 		Name:     "conncheck",
@@ -76,6 +74,18 @@ func New() *analysis.Analyzer {
 		Requires: []*analysis.Analyzer{inspect.Analyzer},
 		Run:      cc.run,
 		Flags:    cc.flags(),
+	}
+}
+
+func defaultConfig() *Config {
+	return &Config{
+		pkgs: stringSliceValue{
+			slice: pkgsDefault,
+		},
+		validUnits: stringSliceValue{
+			slice: validUnitsDefault,
+		},
+		minSeconds: minSecondsDefault,
 	}
 }
 
@@ -125,7 +135,7 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 // process checks if the call expression for SetConnMaxLifetime has a time
 // duration.
 func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.Node) {
-	if cc.settings.debug {
+	if cc.config.printAST {
 		printAST(node)
 	}
 
@@ -182,7 +192,7 @@ func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	var dbObj types.Object
 
 	for _, pkg := range pass.Pkg.Imports() {
-		if slices.Contains(cc.settings.pkgs.slice, pkg.Path()) {
+		if slices.Contains(cc.config.pkgs.slice, pkg.Path()) {
 			dbObj = pkg.Scope().Lookup("DB")
 
 			if dbObj != nil {
@@ -235,7 +245,7 @@ func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 
 	t := calcDuration(unit, 1)
 
-	if t.Seconds() < float64(cc.settings.minSeconds) {
+	if t.Seconds() < float64(cc.config.minSeconds) {
 		return errCalcLessThanMin
 	}
 
@@ -282,7 +292,7 @@ func (cc *connCheck) isTimeGreaterThanMin(arg *ast.BinaryExpr) (bool, error) {
 
 	t := calcDuration(unit, intVal)
 
-	return t.Seconds() >= float64(cc.settings.minSeconds), nil
+	return t.Seconds() >= float64(cc.config.minSeconds), nil
 }
 
 // isValidUnaryExpr checks if the unary expression has a subtraction operator.
@@ -370,7 +380,7 @@ func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 			return "", false
 		}
 
-		if ident.Name == "time" && slices.Contains(cc.settings.validUnits.slice, selector.Sel.Name) {
+		if ident.Name == "time" && slices.Contains(cc.config.validUnits.slice, selector.Sel.Name) {
 			return selector.Sel.Name, true
 		}
 	default:
