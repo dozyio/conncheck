@@ -157,15 +157,9 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 		}
 
 	case *ast.BinaryExpr:
-		if !cc.isValidBinaryExpr(arg) {
-			pass.Report(*newDiagnostic(arg, errMissingUnit.Error()))
-		}
-
-		res, err := cc.isTimeGreaterThanMin(arg)
-		if err == nil {
-			if !res {
-				pass.Report(*newDiagnostic(arg, errCalcLessThanMin.Error()))
-			}
+		err := cc.isValidBinaryExpr(arg)
+		if err != nil {
+			pass.Report(*newDiagnostic(arg, err.Error()))
 		}
 
 	case *ast.CallExpr:
@@ -286,8 +280,9 @@ func (cc *connCheck) isValidBasicLit(arg *ast.BasicLit) bool {
 }
 
 // isValidBinaryExpr checks if the binary expression contains a time unit which
-// would indicate that the duration is set correctly.
-func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) bool {
+// would indicate that the duration is set correctly. It also checks the time
+// value is greater than the minimum required.
+func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) error {
 	hasUnit := false
 
 	if arg.Op == token.MUL {
@@ -302,7 +297,18 @@ func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) bool {
 		}
 	}
 
-	return hasUnit
+	if !hasUnit {
+		return errMissingUnit
+	}
+
+	res, err := cc.isTimeGreaterThanMin(arg)
+	if err == nil {
+		if !res {
+			return errCalcLessThanMin
+		}
+	}
+
+	return nil
 }
 
 // isValidCallExpr checks if the call expression is a call to time.Duration
