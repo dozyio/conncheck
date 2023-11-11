@@ -123,13 +123,14 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 			return
 		}
 
-		ident, identOk := selector.X.(*ast.Ident)
-		if !identOk {
-			return
-		}
-
-		if !isIdentTypeDb(pass.TypesInfo.TypeOf(ident).String()) {
-			fmt.Printf("no pass typesinfo: %v\n", pass.TypesInfo.TypeOf(ident).String())
+		switch selectorX := selector.X.(type) {
+		case *ast.Ident:
+			if !isIdentTypeDb(pass.TypesInfo.TypeOf(selectorX).String()) {
+				fmt.Printf("no pass typesinfo: %v\n", pass.TypesInfo.TypeOf(selectorX).String())
+				return
+			}
+		case *ast.SelectorExpr:
+		default:
 			return
 		}
 
@@ -142,9 +143,13 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 func isIdentTypeDb(s string) bool {
 	match := false
 
-	validIdentTypes := []string{"*database/sql.DB", "*github.com/jmoiron/sqlx.DB", "*github.com/upper/db/v4.Session"}
+	supportedIdentTypes := []string{
+		"*database/sql.DB",
+		"*github.com/jmoiron/sqlx.DB",
+		"*github.com/upper/db/v4.Session",
+	}
 
-	for _, t := range validIdentTypes {
+	for _, t := range supportedIdentTypes {
 		if strings.Contains(t, s) {
 			match = true
 		}
@@ -198,6 +203,12 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 		if err != nil {
 			pass.Report(*newDiagnostic(arg, err.Error()))
 		}
+	case *ast.StarExpr:
+		err := cc.isValidStarExpr(arg)
+		if err != nil {
+			pass.Report(*newDiagnostic(arg, err.Error()))
+		}
+	default:
 	}
 }
 
@@ -281,6 +292,12 @@ func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 	return nil
 }
 
+// isValidStarExpr checks pointers to time.Duration which could indicate a
+// missing time unit
+func (cc *connCheck) isValidStarExpr(arg *ast.StarExpr) error {
+	return errPotentialMissingUnit
+}
+
 // isValidUnaryExpr checks if the unary expression has a subtraction operator.
 // This indicates that the connection should not be closed.
 // https://pkg.go.dev/database/sql#DB.SetConnMaxLifetime
@@ -340,8 +357,17 @@ func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) error {
 
 // isValidCallExpr checks if the call expression is a call to time.Duration
 // which indicates that a time unit is missing.
-func (cc *connCheck) isValidCallExpr(arg *ast.CallExpr) error {
-	if isCallExprTimeDuration(arg) {
+func (cc *connCheck) isValidCallExpr(call *ast.CallExpr) error {
+	if isCallExprTimeDuration(call) {
+		if len(call.Args) > 0 {
+			arg := call.Args[0]
+
+			argLit, ok := arg.(*ast.BasicLit)
+			if ok && cc.isValidBasicLit(argLit) {
+				return nil
+			}
+		}
+
 		return errMissingUnit
 	}
 

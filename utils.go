@@ -214,7 +214,6 @@ func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 // isCallTimeDuration checks if CallExpr is a call to time.Duration
 func isCallExprTimeDuration(arg *ast.CallExpr) bool {
 	selector, selectorOk := arg.Fun.(*ast.SelectorExpr)
-
 	if !selectorOk || selector.X == nil {
 		return false
 	}
