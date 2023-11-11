@@ -12,6 +12,8 @@ func invalidCases() { //nolint:unused // ignore
 	timeoutWithUnit := 1 * time.Second
 	timeoutWithUnit2 := time.Second * 1
 
+	pointer := &timeoutWithUnit
+
 	db.SetConnMaxLifetime(1)                              // want `missing a valid time unit`
 	db.SetConnMaxLifetime(1 * 60)                         // want `missing a valid time unit`
 	db.SetConnMaxLifetime(1 * time.Duration(60))          // want `missing a valid time unit`
@@ -21,7 +23,7 @@ func invalidCases() { //nolint:unused // ignore
 	db.SetConnMaxLifetime(1 * time.Microsecond)           // want `missing a valid time unit`
 	db.SetConnMaxLifetime(1 * time.Millisecond)           // want `missing a valid time unit`
 	db.SetConnMaxLifetime(returnTimeDuration())           // want `potentially missing a time unit`
-	db.SetConnMaxLifetime(*pointerNoUnit)                 // want `potentially missing a time unit`
+	db.SetConnMaxLifetime(*pointer)                       // want `potentially missing a time unit`
 	db.SetConnMaxLifetime(+1)                             // want `operator is not -`
 	db.SetConnMaxLifetime(1 * time.Second)                // want `time is less than minimum required`
 	db.SetConnMaxLifetime(time.Second * 1)                // want `time is less than minimum required`
@@ -31,12 +33,11 @@ func invalidCases() { //nolint:unused // ignore
 	db.SetConnMaxLifetime(timeoutWithUnit2)               // want `time is less than minimum required`
 	db.SetConnMaxLifetime(time.Second)                    // want `time is less than minimum required`
 
-	var setConnMaxLifetime = func(db *sql.DB, connMaxLifetime time.Duration) {
+	var _ = func(db *sql.DB, connMaxLifetime time.Duration) {
 		if connMaxLifetime != 0 {
 			db.SetConnMaxLifetime(connMaxLifetime) // want `potentially missing a time unit`
 		}
 	}
-
 }
 
 func validCases() { //nolint:unused // ignore
