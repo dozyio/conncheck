@@ -8,7 +8,6 @@ import (
 	"go/token"
 	"log"
 	"os"
-	"slices"
 	"strconv"
 	"time"
 
@@ -103,7 +102,7 @@ func callExprToValue(call *ast.CallExpr) (int64, bool) {
 		return 0, false
 	}
 
-	if !isCallTimeDuration(call) {
+	if !isCallExprTimeDuration(call) {
 		return 0, false
 	}
 
@@ -201,7 +200,8 @@ func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 			return "", false
 		}
 
-		if ident.Name == "time" && slices.Contains(cc.config.ValidUnits.slice, selector.Sel.Name) {
+		// @TODO: switch to slices.Contains once Golangci-lint support Go 1.21
+		if ident.Name == "time" && sliceContains(cc.config.ValidUnits.slice, selector.Sel.Name) {
 			return selector.Sel.Name, true
 		}
 	default:
@@ -212,17 +212,22 @@ func (cc *connCheck) isTimeUnit(expr ast.Expr) (string, bool) {
 }
 
 // isCallTimeDuration checks if CallExpr is a call to time.Duration
-func isCallTimeDuration(arg *ast.CallExpr) bool {
+func isCallExprTimeDuration(arg *ast.CallExpr) bool {
 	selector, selectorOk := arg.Fun.(*ast.SelectorExpr)
 
 	if !selectorOk || selector.X == nil {
 		return false
 	}
 
-	ident, identOk := selector.X.(*ast.Ident)
+	return isSelectorExprTimeDuration(selector)
+}
+
+// isSelectorExprTimeDuration checks if SelectorExpr is of type time.Duration
+func isSelectorExprTimeDuration(se *ast.SelectorExpr) bool {
+	ident, identOk := se.X.(*ast.Ident)
 	if !identOk {
 		return false
 	}
 
-	return ident.Name == "time" && selector.Sel.Name == "Duration"
+	return ident.Name == "time" && se.Sel.Name == "Duration"
 }

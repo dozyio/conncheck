@@ -1,6 +1,6 @@
 module github.com/dozyio/conncheck
 
-go 1.21.1
+go 1.20
 
 require golang.org/x/tools v0.14.0
 

@@ -3,11 +3,12 @@ package conncheck
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
-	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -15,7 +16,7 @@ import (
 )
 
 var (
-	pkgsDefault              = []string{"database/sql", "gorm.io/gorm"}
+	pkgsDefault              = []string{"database/sql", "gorm.io/gorm", "github.com/jmoiron/sqlx"}
 	validUnitsDefault        = []string{"Second", "Minute", "Hour"}
 	minSecondsDefault uint64 = 60
 	printASTDefault          = false
@@ -25,7 +26,6 @@ var (
 	errPotentialMissingUnit = errors.New("potentially missing a time unit")
 	errCalcLessThanMin      = errors.New("time is less than minimum required")
 	errNoCalc               = errors.New("can't calculate time")
-	errInvalidParam         = errors.New("invalid parameter")
 )
 
 type Config struct {
@@ -71,11 +71,12 @@ func New(config *Config) *analysis.Analyzer {
 	cc := NewConncheck(config)
 
 	return &analysis.Analyzer{
-		Name:     "conncheck",
-		Doc:      "Conncheck checks db.SetConnMaxLifetime is set to a reasonable value",
-		Requires: []*analysis.Analyzer{inspect.Analyzer},
-		Run:      cc.run,
-		Flags:    cc.flags(),
+		Name:             "conncheck",
+		Doc:              "Conncheck checks db.SetConnMaxLifetime is set to a reasonable value",
+		Requires:         []*analysis.Analyzer{inspect.Analyzer},
+		Run:              cc.run,
+		Flags:            cc.flags(),
+		RunDespiteErrors: true,
 	}
 }
 
@@ -117,6 +118,7 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 		if !selectorOk || selector.X == nil {
 			return
 		}
+
 		if selector.Sel.Name != "SetConnMaxLifetime" {
 			return
 		}
@@ -126,7 +128,8 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 			return
 		}
 
-		if pass.TypesInfo.TypeOf(ident).String() != "*database/sql.DB" {
+		if !isIdentTypeDb(pass.TypesInfo.TypeOf(ident).String()) {
+			fmt.Printf("no pass typesinfo: %v\n", pass.TypesInfo.TypeOf(ident).String())
 			return
 		}
 
@@ -134,6 +137,20 @@ func (cc *connCheck) run(pass *analysis.Pass) (interface{}, error) {
 	})
 
 	return nil, nil
+}
+
+func isIdentTypeDb(s string) bool {
+	match := false
+
+	validIdentTypes := []string{"*database/sql.DB", "*github.com/jmoiron/sqlx.DB", "*github.com/upper/db/v4.Session"}
+
+	for _, t := range validIdentTypes {
+		if strings.Contains(t, s) {
+			match = true
+		}
+	}
+
+	return match
 }
 
 // process checks if the CallExpr for SetConnMaxLifetime has a valid time
@@ -144,6 +161,8 @@ func (cc *connCheck) process(pass *analysis.Pass, call *ast.CallExpr, node ast.N
 	}
 
 	arg := call.Args[0]
+
+	// fmt.Printf("arg: %+v\n", arg)
 
 	switch arg := arg.(type) {
 	case *ast.BasicLit:
@@ -192,7 +211,8 @@ func (cc *connCheck) hasDbObj(pass *analysis.Pass) bool {
 	}
 
 	for _, pkg := range pass.Pkg.Imports() {
-		if slices.Contains(cc.config.Pkgs.slice, pkg.Path()) {
+		// @TODO: switch to slices.Contains once Golangci-lint support Go 1.21
+		if sliceContains(cc.config.Pkgs.slice, pkg.Path()) {
 			dbObj = pkg.Scope().Lookup("DB")
 
 			if dbObj != nil {
@@ -213,24 +233,31 @@ func (cc *connCheck) isValidIdent(ident *ast.Ident) error {
 		return nil
 	}
 
-	decl, declOk := ident.Obj.Decl.(*ast.AssignStmt)
-	if !declOk {
-		return nil
-	}
+	switch decl := ident.Obj.Decl.(type) {
+	case *ast.AssignStmt:
+		if len(decl.Rhs) != 1 {
+			return nil
+		}
 
-	if len(decl.Rhs) != 1 {
-		return nil
-	}
+		rhs, rhsOk := decl.Rhs[0].(*ast.BinaryExpr)
+		if !rhsOk {
+			return nil
+		}
 
-	rhs, rhsOk := decl.Rhs[0].(*ast.BinaryExpr)
-	if !rhsOk {
-		return nil
-	}
+		res, err := cc.isTimeGreaterThanMin(rhs)
+		if err == nil {
+			if !res {
+				return errCalcLessThanMin
+			}
+		}
+	case *ast.Field:
+		sel, selOk := decl.Type.(*ast.SelectorExpr)
+		if !selOk {
+			return nil
+		}
 
-	res, err := cc.isTimeGreaterThanMin(rhs)
-	if err == nil {
-		if !res {
-			return errCalcLessThanMin
+		if isSelectorExprTimeDuration(sel) {
+			return errPotentialMissingUnit
 		}
 	}
 
@@ -242,7 +269,7 @@ func (cc *connCheck) isValidIdent(ident *ast.Ident) error {
 func (cc *connCheck) isValidSelectorExpr(arg *ast.SelectorExpr) error {
 	unit, ok := cc.isTimeUnit(arg)
 	if !ok {
-		return errInvalidParam
+		return errPotentialMissingUnit
 	}
 
 	t := calcDuration(unit, 1)
@@ -314,7 +341,7 @@ func (cc *connCheck) isValidBinaryExpr(arg *ast.BinaryExpr) error {
 // isValidCallExpr checks if the call expression is a call to time.Duration
 // which indicates that a time unit is missing.
 func (cc *connCheck) isValidCallExpr(arg *ast.CallExpr) error {
-	if isCallTimeDuration(arg) {
+	if isCallExprTimeDuration(arg) {
 		return errMissingUnit
 	}
 

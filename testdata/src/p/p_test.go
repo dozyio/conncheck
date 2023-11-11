@@ -29,6 +29,13 @@ func invalidCases() { //nolint:unused // ignore
 	db.SetConnMaxLifetime(timeoutWithUnit)                // want `time is less than minimum required`
 	db.SetConnMaxLifetime(timeoutWithUnit2)               // want `time is less than minimum required`
 	db.SetConnMaxLifetime(time.Second)                    // want `time is less than minimum required`
+
+	var setConnMaxLifetime = func(db *sql.DB, connMaxLifetime time.Duration) {
+		if connMaxLifetime != 0 {
+			db.SetConnMaxLifetime(connMaxLifetime) // want `potentially missing a time unit`
+		}
+	}
+
 }
 
 func validCases() { //nolint:unused // ignore
